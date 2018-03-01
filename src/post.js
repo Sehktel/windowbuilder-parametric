@@ -10,8 +10,9 @@ debug('required');
 // формирует json описания продукции заказа
 async function calc_order(ctx, next) {
 
-  const {_query, route} = ctx;
-  const res = {ref: route.params.ref, production: []};
+  const {_query, params} = ctx;
+  const ref = (params.ref || '').toLowerCase();
+  const res = {ref, production: []};
   const {cat, doc, utils, job_prm} = $p;
   const {contracts, nom, inserts, clrs} = cat;
 
@@ -65,10 +66,12 @@ async function calc_order(ctx, next) {
 
     // допреквизиты: бежим структуре входного параметра, если свойства нет в реквизитах, проверяем доп
     for(const fld in _query) {
-      if(!o._metadata(fld) && job_prm.properties[fld]){
+      if(o._metadata(fld)){
+        continue;
+      }
+      const property = job_prm.properties[fld];
+      if(property && !property.empty()){
         let finded;
-        const property = job_prm.properties[fld];
-        //const value = property.type.date_part && property.type.types.length == 1 ? new Date(_query[fld]) : _query[fld];
         o.extra_fields.find_rows({property}, (row) => {
           row.value = _query[fld];
           finded = true;
@@ -304,11 +307,11 @@ function representation(obj, md) {
 // возаращает конкретный документ по ссылке
 async function doc(ctx, next) {
 
-  const {_query, route, params, _auth} = ctx;
-  const ref = route.params.ref;
+  const {_query, params, _auth} = ctx;
+  const ref = (params.ref || '').toLowerCase();
   const {couch_local, zone} = $p.job_prm;
 
-  const data_mgr = $p.md.mgr_by_class_name(ctx.params.class);
+  const data_mgr = $p.md.mgr_by_class_name(params.class);
   const md = data_mgr.metadata();
   const res = {docs: []};
 
@@ -321,7 +324,7 @@ async function doc(ctx, next) {
       skip_setup: true
     });
 
-    const obj = await pouch.get(ctx.params.class + '|' + ref);
+    const obj = await pouch.get(params.class + '|' + ref);
     res.docs.push(obj);
   }
   else{

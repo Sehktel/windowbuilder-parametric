@@ -177,6 +177,7 @@ debug('required');
 
 function serialize_prod({ o, prod, ctx }) {
   const flds = ['margin', 'price_internal', 'amount_internal', 'marginality', 'first_cost', 'discount', 'discount_percent', 'discount_percent_internal', 'changed', 'ordn', 'characteristic', 'qty'];
+  // человекочитаемая информация в табчасть продукции
   for (let row of o._obj.production) {
     const ox = $p.cat.characteristics.get(row.characteristic);
     const nom = $p.cat.nom.get(row.nom);
@@ -200,6 +201,22 @@ function serialize_prod({ o, prod, ctx }) {
       ox.unload();
     }
   }
+  // человекочитаемая информация в табчасть допреквизитов
+  const { properties } = $p.job_prm;
+  o.extra_fields.forEach(({ property, _obj }) => {
+    let finded;
+    for (const prop in properties) {
+      if (properties[prop] === property) {
+        _obj.property_name = prop;
+        finded = true;
+        break;
+      }
+    }
+    if (!finded) {
+      _obj.property_name = property.name;
+    }
+  });
+  // тело ответа
   ctx.body = JSON.stringify(o);
   prod && prod.forEach(cx => {
     if (!cx.empty() && !cx.is_new() && !cx.calc_order.empty()) {
@@ -211,13 +228,13 @@ function serialize_prod({ o, prod, ctx }) {
 // формирует json описания продукции заказа
 async function calc_order(ctx, next) {
 
-  const { ref } = ctx.params;
+  const ref = (ctx.params.ref || '').toLowerCase();
   const o = await $p.doc.calc_order.get(ref, 'promise');
 
   if (o.is_new()) {
     ctx.status = 404;
     ctx.body = {
-      ref: ref,
+      ref,
       production: [],
       error: true,
       message: `Заказ с идентификатором '${ref}' не существует`
@@ -232,14 +249,16 @@ async function calc_order(ctx, next) {
 async function store(ctx, next) {
   // данные авторизации получаем из контекста
   const { _auth, params } = ctx;
-  const _id = `_local/store.${_auth.suffix}.${params.ref || 'mapping'}`;
+  const ref = (params.ref || '').toLowerCase();
+  const _id = `_local/store.${_auth.suffix}.${ref || 'mapping'}`;
   ctx.body = await $p.adapters.pouch.remote.doc.get(_id).catch(err => ({ error: true, message: `Объект ${_id} не найден\n${err.message}` }));
 }
 
 async function log(ctx, next) {
   // данные авторизации получаем из контекста
   const { _auth, params } = ctx;
-  const _id = `_local/log.${_auth.suffix}.${params.ref}`;
+  const ref = (params.ref || '').toLowerCase();
+  const _id = `_local/log.${_auth.suffix}.${ref}`;
   ctx.body = await $p.adapters.pouch.remote.doc.get(_id).catch(err => ({ error: true, message: `Объект ${_id} не найден\n${err.message}` }));
 }
 
@@ -545,7 +564,8 @@ exports.default = function ($p) {
                   res[row.elm] = _mgr ? _mgr.get(row.value, false, false) : row.value;
                 });
                 return res;
-              })()
+              })(),
+              enumerable: true
             });
           } else if (row.list) {
 
@@ -560,7 +580,8 @@ exports.default = function ($p) {
                 } else {
                   return row.value;
                 }
-              })
+              }),
+              enumerable: true
             });
           } else {
 
@@ -570,7 +591,8 @@ exports.default = function ($p) {
 
             job_prm[parents[row.parent]].__define(row.synonym, {
               value: _mgr ? _mgr.get(row.value, false, false) : row.value,
-              configurable: true
+              configurable: true,
+              enumerable: true
             });
           }
         }
@@ -2549,12 +2571,18 @@ module.exports = function ($p) {
     },
 
     by_partner_and_org: {
-      value: function (partner, organization, contract_kind) {
-        if (!contract_kind) contract_kind = $p.enm.contract_kinds.СПокупателем;
-        var res = this.find_rows({ owner: partner, organization: organization, contract_kind: contract_kind });
-        res.sort(function (a, b) {
-          return a.date > b.date;
-        });
+      value: function (partner, organization, contract_kind = $p.enm.contract_kinds.СПокупателем) {
+
+        const { main_contract } = $p.cat.partners.get(partner);
+
+        //Если у контрагента есть основной договор, и он подходит по виду договора и организации,
+        // возвращаем его, не бегая по массиву
+        if (main_contract && main_contract.contract_kind == contract_kind && main_contract.organization == organization) {
+          return main_contract;
+        }
+
+        const res = this.find_rows({ owner: partner, organization: organization, contract_kind: contract_kind });
+        res.sort((a, b) => a.date > b.date);
         return res.length ? res[0] : this.get();
       }
     }
@@ -3182,10 +3210,99 @@ module.exports = function ($p) {
    * @module cat_inserts
    */
 
+  // подписываемся на событие после загрузки из pouchdb-ram и готовности предопределенных
+  $p.md.once('predefined_elmnts_inited', () => {
+    $p.cat.scheme_settings && $p.cat.scheme_settings.find_schemas('dp.buyers_order.production');
+  });
+
   $p.cat.inserts.__define({
 
     _inserts_types_filling: {
       value: [$p.enm.inserts_types.Заполнение]
+    },
+
+    ItemData: {
+      value: class ItemData {
+        constructor(item, Renderer) {
+
+          this.Renderer = Renderer;
+          this.count = 0;
+
+          // индивидуальные классы строк
+          class ItemRow extends $p.DpBuyers_orderProductionRow {}
+
+          this.ProductionRow = ItemRow;
+
+          // получаем возможные параметры вставок данного типа
+          const prms = new Set();
+          $p.cat.inserts.find_rows({ available: true, insert_type: item }, inset => {
+            inset.used_params.forEach(param => {
+              !param.is_calculated && prms.add(param);
+            });
+            inset.specification.forEach(({ nom }) => {
+              const { used_params } = nom;
+              used_params && used_params.forEach(param => {
+                !param.is_calculated && prms.add(param);
+              });
+            });
+          });
+
+          // индивидуальные метаданные строк
+          const meta = $p.dp.buyers_order.metadata('production');
+          this.meta = meta._clone();
+
+          // отбор по типу вставки
+          this.meta.fields.inset.choice_params[0].path = item;
+
+          const changed = new Set();
+
+          for (const param of prms) {
+
+            // корректируем схему
+            $p.cat.scheme_settings.find_rows({ obj: 'dp.buyers_order.production', name: item.name }, scheme => {
+              if (!scheme.fields.find({ field: param.ref })) {
+                // добавляем строку с новым полем
+                const row = scheme.fields.add({
+                  field: param.ref,
+                  caption: param.caption,
+                  use: true
+                });
+                const note = scheme.fields.find({ field: 'note' });
+                note && scheme.fields.swap(row, note);
+
+                changed.add(scheme);
+              }
+            });
+
+            // корректируем метаданные
+            const mf = this.meta.fields[param.ref] = {
+              synonym: param.caption,
+              type: param.type
+            };
+            if (param.type.types.some(type => type === 'cat.property_values')) {
+              mf.choice_params = [{ name: 'owner', path: param }];
+            }
+
+            // корректируем класс строки
+            Object.defineProperty(ItemRow.prototype, param.ref, {
+              get: function () {
+                const { product_params } = this._owner._owner;
+                const row = product_params.find({ elm: this.row, param }) || product_params.add({ elm: this.row, param });
+                return row.value;
+              },
+              set: function (v) {
+                const { product_params } = this._owner._owner;
+                const row = product_params.find({ elm: this.row, param }) || product_params.add({ elm: this.row, param });
+                row.value = v;
+              }
+            });
+          }
+
+          for (const scheme of changed) {
+            scheme.save();
+          }
+        }
+      }
     },
 
     by_thickness: {
@@ -3226,14 +3343,30 @@ module.exports = function ($p) {
     nom(elm, strict) {
 
       const { _data } = this;
-      if (!strict && _data.nom) {
+
+      if (!strict && !elm && _data.nom) {
         return _data.nom;
       }
 
       const main_rows = [];
       let _nom;
 
-      this.specification.find_rows({ is_main_elm: true }, row => main_rows.push(row));
+      const { check_params } = ProductsBuilding;
+
+      this.specification.find_rows({ is_main_elm: true }, row => {
+        // если есть элемент, фильтруем по параметрам
+        if (elm && !check_params({
+          params: this.selection_params,
+          ox: elm.project.ox,
+          elm: elm,
+          row_spec: row,
+          cnstr: 0,
+          origin: elm.fake_origin || 0
+        })) {
+          return;
+        }
+        main_rows.push(row);
+      });
 
       if (!main_rows.length && !strict && this.specification.count()) {
         main_rows.push(this.specification.get(0));
@@ -3450,7 +3583,7 @@ module.exports = function ($p) {
         }
       }
 
-      this.specification.each(row => {
+      this.specification.forEach(row => {
 
         // Проверяем ограничения строки вставки
         if (!check_restrictions(row, elm, insert_type == Профиль, len_angl)) {
@@ -3672,9 +3805,9 @@ module.exports = function ($p) {
      */
     get used_params() {
       const res = [];
-      this.selection_params.each(row => {
-        if (!row.param.empty() && res.indexOf(row.param) == -1) {
-          res.push(row.param);
+      this.selection_params.forEach(({ param }) => {
+        if (!param.empty() && res.indexOf(param) == -1) {
+          res.push(param);
         }
       });
       return res;
@@ -4905,7 +5038,17 @@ module.exports = function ($p) {
       }, true)).then(ox => {
         // если указана строка-генератор, заполняем реквизиты
         if (row_spec instanceof $p.DpBuyers_orderProductionRow) {
-          ox.owner = row_spec.inset.nom(elm, true);
+
+          if (params) {
+            params.find_rows({ elm: row_spec.row }, prow => {
+              ox.params.add(prow, true).inset = row_spec.inset;
+            });
+          }
+
+          elm.project = { ox };
+          elm.fake_origin = row_spec.inset;
+
+          ox.owner = row_spec.inset.nom(elm);
           ox.origin = row_spec.inset;
           ox.x = row_spec.len;
           ox.y = row_spec.height;
@@ -4913,12 +5056,6 @@ module.exports = function ($p) {
           ox.s = row_spec.s || row_spec.len * row_spec.height / 1000000;
           ox.clr = row_spec.clr;
           ox.note = row_spec.note;
-
-          if (params) {
-            params.find_rows({ elm: row_spec.row }, prow => {
-              ox.params.add(prow, true).inset = row_spec.inset;
-            });
-          }
         }
 
         // устанавливаем свойства в строке заказа
@@ -6776,13 +6913,6 @@ module.exports = function ($p) {
       const { calc_order_row, price_type } = prm;
       const price_cost = $p.job_prm.pricing.marginality_in_spec && prm.spec.count() ? prm.spec.aggregate([], ["amount_marged"]) : this.nom_price(calc_order_row.nom, calc_order_row.characteristic, price_type.price_type_sale, prm, {});
 
-      let extra_charge = $p.wsql.get_user_param("surcharge_internal", "number");
-
-      // если пересчет выполняется менеджером, используем наценку по умолчанию
-      if (!$p.current_user.partners_uids.length || !extra_charge) {
-        extra_charge = price_type.extra_charge_external;
-      }
-
       // цена продажи
       if (price_cost) {
         calc_order_row.price = price_cost.round(2);
@@ -6793,12 +6923,15 @@ module.exports = function ($p) {
       // КМарж в строке расчета
       calc_order_row.marginality = calc_order_row.first_cost ? calc_order_row.price * ((100 - calc_order_row.discount_percent) / 100) / calc_order_row.first_cost : 0;
 
-      // TODO: Рассчитаем цену и сумму ВНУТР или ДИЛЕРСКУЮ цену и скидку
-      if (extra_charge) {
-        calc_order_row.price_internal = (calc_order_row.price * (100 - calc_order_row.discount_percent) / 100 * (100 + extra_charge) / 100).round(2);
-
-        // TODO: учесть формулу
+      // Рассчитаем цену и сумму ВНУТР или ДИЛЕРСКУЮ цену и скидку
+      let extra_charge = $p.wsql.get_user_param("surcharge_internal", "number");
+      // если пересчет выполняется менеджером, используем наценку по умолчанию
+      if (!$p.current_user.partners_uids.length || !extra_charge) {
+        extra_charge = price_type.extra_charge_external || 0;
       }
+
+      // TODO: учесть формулу
+      calc_order_row.price_internal = (calc_order_row.price * (100 - calc_order_row.discount_percent) / 100 * (100 + extra_charge) / 100).round(2);
 
       // Эмулируем событие окончания редактирования, чтобы единообразно пересчитать строку табчасти
       !prm.hand_start && calc_order_row.value_change("price", {}, calc_order_row.price, true);
@@ -8639,8 +8772,9 @@ debug('required');
 // формирует json описания продукции заказа
 async function calc_order(ctx, next) {
 
-  const { _query, route } = ctx;
-  const res = { ref: route.params.ref, production: [] };
+  const { _query, params } = ctx;
+  const ref = (params.ref || '').toLowerCase();
+  const res = { ref, production: [] };
   const { cat, doc, utils, job_prm } = $p;
   const { contracts, nom, inserts, clrs } = cat;
 
@@ -8693,10 +8827,12 @@ async function calc_order(ctx, next) {
 
     // допреквизиты: бежим структуре входного параметра, если свойства нет в реквизитах, проверяем доп
     for (const fld in _query) {
-      if (!o._metadata(fld) && job_prm.properties[fld]) {
+      if (o._metadata(fld)) {
+        continue;
+      }
+      const property = job_prm.properties[fld];
+      if (property && !property.empty()) {
         let finded;
-        const property = job_prm.properties[fld];
-        //const value = property.type.date_part && property.type.types.length == 1 ? new Date(_query[fld]) : _query[fld];
         o.extra_fields.find_rows({ property }, row => {
           row.value = _query[fld];
           finded = true;
@@ -8920,11 +9056,11 @@ function representation(obj, md) {
 // возаращает конкретный документ по ссылке
 async function doc(ctx, next) {
 
-  const { _query, route, params, _auth } = ctx;
-  const ref = route.params.ref;
+  const { _query, params, _auth } = ctx;
+  const ref = (params.ref || '').toLowerCase();
   const { couch_local, zone } = $p.job_prm;
 
-  const data_mgr = $p.md.mgr_by_class_name(ctx.params.class);
+  const data_mgr = $p.md.mgr_by_class_name(params.class);
   const md = data_mgr.metadata();
   const res = { docs: [] };
 
@@ -8937,7 +9073,7 @@ async function doc(ctx, next) {
       skip_setup: true
     });
 
-    const obj = await pouch.get(ctx.params.class + '|' + ref);
+    const obj = await pouch.get(params.class + '|' + ref);
     res.docs.push(obj);
   } else {
     const obj = data_mgr.get(ref);

@@ -8,6 +8,7 @@ debug('required');
 function serialize_prod({o, prod, ctx}) {
   const flds = ['margin', 'price_internal', 'amount_internal', 'marginality', 'first_cost', 'discount', 'discount_percent',
     'discount_percent_internal', 'changed', 'ordn', 'characteristic', 'qty'];
+  // человекочитаемая информация в табчасть продукции
   for(let row of o._obj.production){
     const ox = $p.cat.characteristics.get(row.characteristic);
     const nom = $p.cat.nom.get(row.nom);
@@ -32,6 +33,22 @@ function serialize_prod({o, prod, ctx}) {
       ox.unload();
     }
   }
+  // человекочитаемая информация в табчасть допреквизитов
+  const {properties} = $p.job_prm;
+  o.extra_fields.forEach(({property, _obj}) => {
+    let finded;
+    for(const prop in properties){
+      if(properties[prop] === property) {
+        _obj.property_name = prop;
+        finded = true;
+        break;
+      }
+    }
+    if(!finded) {
+      _obj.property_name = property.name;
+    }
+  });
+  // тело ответа
   ctx.body = JSON.stringify(o);
   prod && prod.forEach((cx) => {
     if (!cx.empty() && !cx.is_new() && !cx.calc_order.empty()) {
@@ -43,13 +60,13 @@ function serialize_prod({o, prod, ctx}) {
 // формирует json описания продукции заказа
 async function calc_order(ctx, next) {
 
-  const {ref} = ctx.params;
+  const ref = (ctx.params.ref || '').toLowerCase();
   const o = await $p.doc.calc_order.get(ref, 'promise');
 
   if(o.is_new()){
     ctx.status = 404;
     ctx.body = {
-      ref: ref,
+      ref,
       production: [],
       error: true,
       message: `Заказ с идентификатором '${ref}' не существует`,
@@ -65,7 +82,8 @@ async function calc_order(ctx, next) {
 async function store(ctx, next) {
   // данные авторизации получаем из контекста
   const {_auth, params} = ctx;
-  const _id = `_local/store.${_auth.suffix}.${params.ref || 'mapping'}`;
+  const ref = (params.ref || '').toLowerCase();
+  const _id = `_local/store.${_auth.suffix}.${ref || 'mapping'}`;
   ctx.body = await $p.adapters.pouch.remote.doc.get(_id)
     .catch((err) => ({error: true, message: `Объект ${_id} не найден\n${err.message}`}));
 }
@@ -73,7 +91,8 @@ async function store(ctx, next) {
 async function log(ctx, next) {
   // данные авторизации получаем из контекста
   const {_auth, params} = ctx;
-  const _id = `_local/log.${_auth.suffix}.${params.ref}`;
+  const ref = (params.ref || '').toLowerCase();
+  const _id = `_local/log.${_auth.suffix}.${ref}`;
   ctx.body = await $p.adapters.pouch.remote.doc.get(_id)
     .catch((err) => ({error: true, message: `Объект ${_id} не найден\n${err.message}`}));
 }
